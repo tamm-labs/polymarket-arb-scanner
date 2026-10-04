@@ -402,28 +402,6 @@ class TestExtractKeys:
         assert ("polymarket", "Test") in keys
         assert not any(k[0] == "" for k in keys)
 
-    def test_extract_keys_jev_crypto_buy_yes(self):
-        opp = {
-            "type": "JevCrypto",
-            "_action": "buy_yes",
-            "_token_ids": ["tok_yes_123", "tok_no_456"],
-        }
-        keys = OpportunityIndex._extract_keys(opp)
-        assert ("polymarket", "tok_yes_123") in keys
-        assert ("polymarket", "tok_no_456") not in keys
-        assert len(keys) == 1
-
-    def test_extract_keys_jev_crypto_buy_no(self):
-        opp = {
-            "type": "JevCrypto",
-            "_action": "buy_no",
-            "_token_ids": ["tok_yes_123", "tok_no_456"],
-        }
-        keys = OpportunityIndex._extract_keys(opp)
-        assert ("polymarket", "tok_no_456") in keys
-        assert ("polymarket", "tok_yes_123") not in keys
-        assert len(keys) == 1
-
 
 # ---------------------------------------------------------------------------
 # _recalc_profit — WS trigger profit recalculation

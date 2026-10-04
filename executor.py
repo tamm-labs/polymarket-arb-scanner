@@ -405,10 +405,9 @@ class ArbitrageExecutor:
         market = opportunity.get("market", "Unknown")
 
         # Experimental Jev forecasts have no demonstrated trading calibration.
-        # Check the type as well as the marker so a plain dict cannot omit the guard.
         # A news snipe whose direction Jev chose is a Jev forecast too.
         jev_directed = str(opportunity.get("_sentiment_source") or "").startswith("jev")
-        if not self.dry_run and (opp_type == "JevCrypto" or opportunity.get("_research_only") or jev_directed):
+        if not self.dry_run and (opportunity.get("_research_only") or jev_directed):
             self._log_skipped(opportunity, "jev_research_only")
             return False
 
@@ -896,66 +895,6 @@ class ArbitrageExecutor:
                     reason = f"Confidence {confidence:.2f} below threshold {NEWS_SNIPE_CONFIDENCE_THRESHOLD}"
                 else:
                     reason = "confidence_verified"
-            elif opp_type == "JevCrypto":
-                confidence = opportunity.get("_confidence", 0.0)
-                from config import JEV_CONFIDENCE_THRESHOLD, JEV_MIN_EDGE, MIN_NET_ROI
-                from fees import net_profit_jev_crypto
-                if confidence < JEV_CONFIDENCE_THRESHOLD:
-                    passed = False
-                    reason = f"Jev confidence {confidence:.2f} below threshold {JEV_CONFIDENCE_THRESHOLD}"
-                else:
-                    action = opportunity.get("_action", "buy_yes")
-                    token_ids = opportunity.get("_token_ids", [])
-                    token_idx = 0 if action == "buy_yes" else 1
-                    target_token = token_ids[token_idx] if len(token_ids) > token_idx else None
-                    if not target_token:
-                        passed = False
-                        reason = "missing_target_token"
-                    else:
-                        cached = self._check_ws_cache(price_cache, "polymarket", target_token)
-                        curr_ask = _cached_probability(cached, "best_ask", "ask", "price") if cached else None
-                        if curr_ask is None:
-                            try:
-                                book = fetch_order_book(target_token)
-                                ba = get_best_bid_ask(book) if book else {}
-                                curr_ask = ba.get("ask")
-                            except Exception as e:
-                                logger.warning("Failed to fetch orderbook for Jev revalidation: %s", e)
-                                curr_ask = None
-                        if curr_ask is None or curr_ask <= 0.0 or curr_ask >= 1.0:
-                            passed = False
-                            reason = "price_retrieval_failed"
-                        else:
-                            model_prob = float(opportunity.get("_model_prob", 0.5))
-                            prob_target = model_prob if action == "buy_yes" else (1.0 - model_prob)
-                            raw_edge = prob_target - curr_ask
-                            if raw_edge < JEV_MIN_EDGE:
-                                passed = False
-                                reason = f"Jev edge {raw_edge:.4f} collapsed below min {JEV_MIN_EDGE:.4f}"
-                            else:
-                                raw_cost = opportunity.get("total_cost", 50.0)
-                                try:
-                                    cost_val = float(str(raw_cost).replace("$", ""))
-                                except (TypeError, ValueError):
-                                    cost_val = 50.0
-                                depth = opportunity.get("_clob_depth", 0)
-                                if hasattr(self, "risk") and self.risk:
-                                    exec_size = self.risk.clamp_size(cost_val, depth, cost_val)
-                                else:
-                                    exec_size = cost_val
-                                recalc = net_profit_jev_crypto(
-                                    price=curr_ask,
-                                    model_prob=prob_target,
-                                    size=exec_size,
-                                )
-                                if recalc["net_profit"] <= 0 or recalc["net_roi"] < MIN_NET_ROI:
-                                    passed = False
-                                    reason = f"Jev net ROI {recalc['net_roi']:.4f} below min {MIN_NET_ROI}"
-                                else:
-                                    opportunity["_exec_price"] = curr_ask
-                                    opportunity["net_profit"] = recalc["net_profit"]
-                                    opportunity["net_roi"] = recalc["net_roi"]
-                                    reason = "jev_confidence_and_price_verified"
             elif opp_type == "Correlated":
                 # STRAT-06: Correlated revalidation — check spread hasn't collapsed
                 current_spread = opportunity.get("_spread", 0.0)
@@ -2783,21 +2722,6 @@ class ArbitrageExecutor:
             else:
                 legs = [{"platform": "polymarket", "side": "BUY", "token": "no",
                          "price": opportunity.get("_no_price", 0), "_token_id": no_token}]
-        elif opp_type == "JevCrypto":
-            action = opportunity.get("_action", "buy_yes")
-            token_ids = opportunity.get("_token_ids", [])
-            if not token_ids or len(token_ids) < 2:
-                raise ValueError(f"JevCrypto opp missing token IDs: {opportunity}")
-            yes_token = token_ids[0]
-            no_token = token_ids[1]
-            exec_price = opportunity.get("_exec_price", 0.0)
-
-            if action == "buy_yes":
-                legs = [{"platform": "polymarket", "side": "BUY", "token": "yes",
-                         "price": exec_price, "_token_id": yes_token}]
-            else:
-                legs = [{"platform": "polymarket", "side": "BUY", "token": "no",
-                         "price": exec_price, "_token_id": no_token}]
         elif opp_type == "Correlated":
             # STRAT-06: Correlated Pairs — long underpriced, short overpriced
             long_leg = opportunity.get("_long_leg", {})

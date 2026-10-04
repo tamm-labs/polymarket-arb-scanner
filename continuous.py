@@ -99,7 +99,6 @@ from scans import (
     scan_lead_lag_mm,
     scan_toxic_flow_pause,
     scan_volatility_adjusted_mm,
-    scan_jev_crypto,
     _fetch_kalshi_data,
     capital_efficiency_score,
 )
@@ -362,18 +361,10 @@ class OpportunityIndex:
         opp_type = opp.get("type", "")
 
         # Polymarket token IDs
-        if opp_type == "JevCrypto":
-            action = opp.get("_action", "buy_yes")
-            token_ids = opp.get("_token_ids", [])
-            if action == "buy_yes" and len(token_ids) > 0 and token_ids[0]:
-                keys.append(("polymarket", token_ids[0]))
-            elif action == "buy_no" and len(token_ids) > 1 and token_ids[1]:
-                keys.append(("polymarket", token_ids[1]))
-        else:
-            token_ids = opp.get("_token_ids", [])
-            for tid in token_ids:
-                if tid:
-                    keys.append(("polymarket", tid))
+        token_ids = opp.get("_token_ids", [])
+        for tid in token_ids:
+            if tid:
+                keys.append(("polymarket", tid))
 
         # Kalshi tickers
         kalshi_ticker = opp.get("_kalshi_ticker", "")
@@ -929,29 +920,6 @@ def _recalc_profit(opp: dict, platform: str, ticker: str, new_price: float, pric
                 platform_a=pa, platform_b=pb,
             )
             return result["net_profit"]
-        elif opp_type == "JevCrypto":
-            from fees import net_profit_jev_crypto
-            model_prob = opp.get("_model_prob")
-            action = opp.get("_action", "buy_yes")
-            token_ids = opp.get("_token_ids", [])
-            if model_prob is None or len(token_ids) < 2:
-                return None
-            if action == "buy_yes" and ticker == token_ids[0]:
-                exec_price = new_price
-                prob_target = model_prob
-            elif action == "buy_no" and ticker == token_ids[1]:
-                exec_price = new_price
-                prob_target = 1.0 - model_prob
-            else:
-                return None
-
-            trade_size = 50.0
-            res = net_profit_jev_crypto(
-                price=exec_price,
-                model_prob=prob_target,
-                size=trade_size,
-            )
-            return res["net_profit"]
     except Exception as e:
         logger.debug("Error recalculating profit: %s", e)
         return None
@@ -976,7 +944,6 @@ def _get_market_lock(market: str) -> threading.Lock:
 _PRIORITY_WEIGHTS = {
     "StalePriceOpp": 3.0,       # Most time-sensitive: stale prices disappear quickly
     "ResolutionSnipeOpp": 2.5,  # Resolution imminent: price converges fast
-    "JevCrypto": 2.2,           # Model-calibrated crypto strike edge: priority execution
     "Binary": 2.0,              # Pure arb: guaranteed profit, execute quickly
     "KalshiBinary": 2.0,
     "Cross": 2.0,
@@ -1389,40 +1356,6 @@ def _scan_ctf_layer1(poly_markets, mode, min_profit, price_cache=None, funnel=No
     except Exception as exc:
         logger.warning("CTF primitives scan failed: %s", exc)
         return []
-
-
-
-def _scan_jev_crypto_continuous(
-    poly_markets,
-    mode: str,
-    min_profit: float,
-    db=None,
-    jev_client=None,
-    spot_prices=None,
-) -> list[dict]:
-    """Continuous-mode runner for Jev-powered crypto prediction market scanner.
-
-    Evaluates BTC, ETH, SOL, XRP strike contracts against live spot prices.
-    Returns [] when disabled, mode doesn't match ('all' or 'jev-crypto'),
-    or if no markets are provided.
-    """
-    if mode not in ("all", "jev-crypto"):
-        return []
-    is_explicit = (mode == "jev-crypto")
-    enabled = getattr(config, "JEV_CRYPTO_ENABLED", False)
-    if not is_explicit and not enabled:
-        return []
-    markets_by_key = _build_poly_markets_by_key(poly_markets)
-    if not markets_by_key:
-        return []
-    return scan_jev_crypto(
-        markets_by_key,
-        spot_prices=spot_prices,
-        min_profit=min_profit,
-        jev_client=jev_client,
-        db=db,
-        force=is_explicit,
-    )
 
 
 def _scan_rewards_continuous(
@@ -2668,18 +2601,6 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
 
                 try:
                     all_opportunities.extend(
-                        _scan_jev_crypto_continuous(
-                            poly_markets,
-                            args.mode,
-                            min_profit,
-                            db=db,
-                        )
-                    )
-                except Exception as exc:
-                    logger.warning("Jev crypto scan failed: %s", exc)
-
-                try:
-                    all_opportunities.extend(
                         _scan_frechet_layer1(
                             poly_markets,
                             args.mode,
@@ -2994,8 +2915,6 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                     1 for o in all_opportunities if o.get("type") == "ResolutionSnipeOpp")
                 dashboard_state.convergence_signals = sum(
                     1 for o in all_opportunities if o.get("type") == "ConvergenceOpp")
-                dashboard_state.jev_crypto_opps = sum(
-                    1 for o in all_opportunities if o.get("type") == "JevCrypto")
                 if _market_maker:
                     mm_status = _market_maker.get_status()
                     dashboard_state.mm_active_markets = mm_status["active_markets"]

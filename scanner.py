@@ -51,7 +51,6 @@ from scans.resolution import scan_resolution_snipes  # noqa: F401
 from scans.convergence import scan_convergence  # noqa: F401
 from scans.fee_promo import scan_fee_promo  # noqa: F401
 from scans.cross_mm import scan_cross_mm  # noqa: F401
-from scans.jev_crypto import scan_jev_crypto, _refine_jev_crypto_with_clob  # noqa: F401
 from scans.frechet import scan_frechet, _refine_frechet_with_clob  # noqa: F401
 from scans.temporal import scan_temporal_arb, _refine_temporal_with_clob  # noqa: F401
 from scans.ctf import scan_ctf, _refine_ctf_with_clob  # noqa: F401
@@ -104,8 +103,6 @@ __all__ = [
     "scan_convergence",
     "scan_fee_promo",
     "scan_cross_mm",
-    "scan_jev_crypto",
-    "_refine_jev_crypto_with_clob",
     "scan_frechet",
     "_refine_frechet_with_clob",
     "scan_temporal_arb",

@@ -17,8 +17,6 @@ logger = logging.getLogger(__name__)
 def scan_toxic_flow_pause(
     market_keys: list[str] | None = None,
     detector=None,
-    spot_deltas: dict[str, dict] | None = None,
-    jev_client=None,
 ) -> list[dict]:
     """Emit ToxicFlowPause defensive opportunities for currently-paused markets.
 
@@ -28,9 +26,6 @@ def scan_toxic_flow_pause(
             MarketMaker registry).
         detector: Optional ``ToxicFlowDetector`` instance. Defaults to the
             module singleton ``market_maker.get_toxic_flow_detector()``.
-        spot_deltas: Optional mapping of market_key -> {"asset": str, "spot_delta_pct": float, "fill_skew": float}
-            for proactive Jev-powered adverse selection evaluation.
-        jev_client: Optional JevClient instance for spot toxicity evaluation.
 
     Returns:
         List of ToxicFlowPause opportunity dicts (possibly empty).
@@ -46,67 +41,6 @@ def scan_toxic_flow_pause(
     if detector is None:
         from market_maker import get_toxic_flow_detector
         detector = get_toxic_flow_detector()
-
-    # Proactively evaluate adverse selection via Jev System One
-    if hasattr(detector, "evaluate_spot_toxicity_with_jev"):
-        active_deltas = spot_deltas
-        if active_deltas is None:
-            # Proactively derive spot deltas from live spot feed if Jev is available
-            try:
-                from config import OPENROUTER_API_KEY
-                if OPENROUTER_API_KEY:
-                    from scans.jev_crypto import fetch_spot_prices
-                    spots = fetch_spot_prices()
-                    if spots:
-                        active_deltas = {}
-                        import re
-                        for mk in market_keys:
-                            mk_lower = mk.lower()
-                            matched_asset = None
-                            for sym in ("btc", "bitcoin"):
-                                if re.search(rf"\b{sym}\b", mk_lower):
-                                    matched_asset = "BTC"
-                                    break
-                            if not matched_asset:
-                                for sym in ("eth", "ethereum"):
-                                    if re.search(rf"\b{sym}\b", mk_lower):
-                                        matched_asset = "ETH"
-                                        break
-                            if not matched_asset:
-                                for sym in ("sol", "solana"):
-                                    if re.search(rf"\b{sym}\b", mk_lower):
-                                        matched_asset = "SOL"
-                                        break
-                            if not matched_asset:
-                                for sym in ("xrp", "ripple"):
-                                    if re.search(rf"\b{sym}\b", mk_lower):
-                                        matched_asset = "XRP"
-                                        break
-                            if matched_asset and matched_asset in spots:
-                                sinfo = spots[matched_asset]
-                                change_pct = float(sinfo.get("change_24h", 0.0))
-                                active_deltas[mk] = {
-                                    "asset": matched_asset,
-                                    "spot_delta_pct": change_pct,
-                                    "fill_skew": 0.0,
-                                }
-            except Exception as e:
-                logger.debug("Automatic spot delta lookup for toxic flow failed: %s", e)
-
-        if active_deltas:
-            for market_key in market_keys:
-                if market_key in active_deltas and not detector.should_pause(market_key):
-                    ctx = active_deltas[market_key]
-                    asset = ctx.get("asset", "CRYPTO")
-                    spot_delta_pct = float(ctx.get("spot_delta_pct", 0.0))
-                    fill_skew = float(ctx.get("fill_skew", 0.0))
-                    detector.evaluate_spot_toxicity_with_jev(
-                        market_key=market_key,
-                        asset=asset,
-                        spot_delta_pct=spot_delta_pct,
-                        recent_fill_skew=fill_skew,
-                        client=jev_client,
-                    )
 
     opps: list[dict] = []
     for market_key in market_keys:
