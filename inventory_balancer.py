@@ -5,6 +5,7 @@ detects significant imbalances, generates delta-neutral rebalancing proposals,
 and gates new trades in RiskManager to prevent worsening unhedged delta skew.
 """
 
+import json
 import logging
 import threading
 import time
@@ -14,9 +15,13 @@ from config import (
     INVENTORY_MAX_DELTA_CONTRACTS,
     INVENTORY_MAX_IMBALANCE_RATIO,
     INVENTORY_REBALANCE_MAX_COST,
+    INVENTORY_AUTO_REBALANCE_ENABLED,
+    INVENTORY_REBALANCE_COOLDOWN_SEC,
+    INVENTORY_REBALANCE_MIN_IMBALANCE_RATIO,
 )
 
 logger = logging.getLogger(__name__)
+
 
 
 class InventoryBalancer:
@@ -35,6 +40,9 @@ class InventoryBalancer:
         max_imbalance_ratio: float | None = None,
         max_rebalance_cost: float | None = None,
         enabled: bool | None = None,
+        auto_rebalance_enabled: bool | None = None,
+        rebalance_cooldown_sec: float | None = None,
+        min_imbalance_ratio: float | None = None,
     ):
         """Initialize the cross-venue inventory balancer.
 
@@ -43,6 +51,9 @@ class InventoryBalancer:
             max_imbalance_ratio: Ratio threshold (|Delta| / total_contracts >= ratio).
             max_rebalance_cost: Maximum dollar cost allocated to a single rebalance.
             enabled: Master switch for inventory balancing and skew gating.
+            auto_rebalance_enabled: Whether automated rebalance execution is active.
+            rebalance_cooldown_sec: Cooldown seconds between rebalances on the same market.
+            min_imbalance_ratio: Minimum imbalance ratio required for auto-execution.
         """
         self.enabled = INVENTORY_BALANCER_ENABLED if enabled is None else bool(enabled)
         self.max_delta_contracts = (
@@ -54,6 +65,15 @@ class InventoryBalancer:
         self.max_rebalance_cost = (
             INVENTORY_REBALANCE_MAX_COST if max_rebalance_cost is None else float(max_rebalance_cost)
         )
+        self.auto_rebalance_enabled = (
+            INVENTORY_AUTO_REBALANCE_ENABLED if auto_rebalance_enabled is None else bool(auto_rebalance_enabled)
+        )
+        self.rebalance_cooldown_sec = (
+            INVENTORY_REBALANCE_COOLDOWN_SEC if rebalance_cooldown_sec is None else float(rebalance_cooldown_sec)
+        )
+        self.min_imbalance_ratio = (
+            INVENTORY_REBALANCE_MIN_IMBALANCE_RATIO if min_imbalance_ratio is None else float(min_imbalance_ratio)
+        )
 
         # In-memory inventory tracking:
         # {market_key: {platform: {"yes": float, "no": float}}}
@@ -62,7 +82,25 @@ class InventoryBalancer:
         self._ticker_map: dict[str, str] = {}
         # Track market keys populated by sync_from_db to preserve pilot-only positions
         self._db_synced_markets: set[str] = set()
+        # Per-market rebalance timestamps for cooldown enforcement
+        self._last_rebalance_time: dict[str, float] = {}
         self._lock = threading.Lock()
+
+    def is_cooldown_active(self, market_key: str, now: float | None = None) -> bool:
+        """Check if rebalance cooldown is active for a market."""
+        resolved = self._resolve_market_key(market_key)
+        t = time.time() if now is None else now
+        with self._lock:
+            last = self._last_rebalance_time.get(resolved, 0.0)
+        return (t - last) < self.rebalance_cooldown_sec
+
+    def record_rebalance_time(self, market_key: str, timestamp: float | None = None) -> None:
+        """Record the timestamp of an executed rebalance trade."""
+        resolved = self._resolve_market_key(market_key)
+        t = time.time() if timestamp is None else timestamp
+        with self._lock:
+            self._last_rebalance_time[resolved] = t
+
 
     def register_ticker_alias(self, ticker: str, market_key: str) -> None:
         """Register an alias mapping from a venue ticker/identifier to a canonical market key."""
@@ -412,6 +450,7 @@ class InventoryBalancer:
                 "estimated_cost": round(est_cost, 4),
                 "current_delta": delta_net,
                 "projected_delta": round(projected_delta, 4),
+                "token_id": best_quote.get("token_id"),
                 "reason": (
                     f"Deficient {target_outcome.upper()}: buying {order_qty:.1f} {target_outcome.upper()} "
                     f"on {venue} @ {ask_price:.3f} to reduce delta from {delta_net:+.1f} to {projected_delta:+.1f}"
@@ -419,6 +458,340 @@ class InventoryBalancer:
             })
 
         return proposals
+
+    def execute_rebalancing_proposals(
+        self,
+        proposals: list[dict],
+        dry_run: bool = True,
+        kalshi_client=None,
+        polymarket_client=None,
+        trade_db=None,
+    ) -> list[dict]:
+        """Execute automated delta-neutral rebalancing trade proposals.
+
+        Validates proposal safety constraints, enforces per-market cooldowns,
+        verifies live venue submission authorization, and places limit orders
+        on the deficient outcome to reduce net directional exposure.
+
+        Args:
+            proposals: List of proposal dicts generated by `generate_rebalancing_proposals`.
+            dry_run: Whether to execute in dry-run mode (default True).
+            kalshi_client: Optional Kalshi client for Kalshi order placement.
+            polymarket_client: Optional Polymarket client / trader.
+            trade_db: Optional TradeDB instance for trade logging.
+
+        Returns:
+            List of execution outcome dicts for each processed proposal.
+        """
+        if not proposals:
+            return []
+
+        results = []
+        now = time.time()
+
+        for prop in proposals:
+            m_key = prop.get("market_key", "")
+            venue = prop.get("target_venue", "").lower()
+            outcome = prop.get("outcome", "").lower()
+            side = prop.get("side", "buy").lower()
+            size = float(prop.get("size", 0.0))
+            price = float(prop.get("price", 0.0))
+            est_cost = float(prop.get("estimated_cost", size * price))
+
+            if not m_key or not venue or size <= 0 or price <= 0:
+                continue
+
+            # 1. Cooldown check
+            if self.is_cooldown_active(m_key, now=now):
+                logger.info("Rebalance cooldown active for %s; skipping execution", m_key)
+                results.append({
+                    "market_key": m_key,
+                    "venue": venue,
+                    "outcome": outcome,
+                    "size": size,
+                    "price": price,
+                    "executed": False,
+                    "status": "cooldown_active",
+                })
+                continue
+
+            # 2. Check cost ceiling
+            if est_cost > self.max_rebalance_cost * 1.05:  # allow 5% float tolerance
+                logger.warning(
+                    "Rebalance cost $%.2f exceeds max allowed $%.2f for %s; skipping",
+                    est_cost, self.max_rebalance_cost, m_key,
+                )
+                results.append({
+                    "market_key": m_key,
+                    "venue": venue,
+                    "outcome": outcome,
+                    "size": size,
+                    "price": price,
+                    "executed": False,
+                    "status": "cost_cap_exceeded",
+                })
+                continue
+
+            # 3. Dry-Run path
+            if dry_run:
+                order_id = f"dry_run_rebal_{m_key}_{int(now)}"
+                logger.info(
+                    "[DRY RUN] Auto-rebalance order: %s %s %.1f %s @ %.3f ($%.2f) on %s",
+                    side.upper(), outcome.upper(), size, m_key, price, est_cost, venue,
+                )
+                self.record_rebalance_time(m_key, now)
+
+                # Optionally log to DB
+                if trade_db and hasattr(trade_db, "log_opportunity"):
+                    try:
+                        opp_id = trade_db.log_opportunity(
+                            opp_type="InventoryRebalance",
+                            market=m_key,
+                            prices=json.dumps({f"{outcome}_ask": price}),
+                            total_cost=est_cost,
+                            net_profit=0.0,
+                            net_roi=0.0,
+                            depth=size,
+                            action="dry_run",
+                        )
+                        if opp_id and hasattr(trade_db, "log_trade"):
+                            trade_db.log_trade(
+                                opportunity_id=opp_id,
+                                platform=venue,
+                                side=side.upper(),
+                                price=price,
+                                size=size,
+                                status="dry_run",
+                                fill_price=price,
+                                order_id=order_id,
+                                outcome=outcome,
+                            )
+                    except Exception as e:
+                        logger.debug("Failed to record dry-run rebalance in trade_db: %s", e)
+
+                results.append({
+                    "market_key": m_key,
+                    "venue": venue,
+                    "action": "rebalance_buy",
+                    "outcome": outcome,
+                    "side": side,
+                    "size": size,
+                    "price": price,
+                    "cost": est_cost,
+                    "status": "dry_run",
+                    "executed": True,
+                    "order_id": order_id,
+                })
+                continue
+
+            # 4. Live execution path
+            if venue == "kalshi":
+                from kalshi_policy import live_kalshi_submit_allowed
+                # Kalshi order submission policy guard
+                if not live_kalshi_submit_allowed(m_key, reducing=True):
+                    logger.warning(
+                        "Rebalance order blocked: live Kalshi submission not allowed for %s", m_key
+                    )
+                    results.append({
+                        "market_key": m_key,
+                        "venue": venue,
+                        "outcome": outcome,
+                        "size": size,
+                        "price": price,
+                        "executed": False,
+                        "status": "blocked_by_policy",
+                    })
+                    continue
+
+                if not kalshi_client:
+                    logger.error("Kalshi client unavailable for rebalance execution")
+                    results.append({
+                        "market_key": m_key,
+                        "venue": venue,
+                        "outcome": outcome,
+                        "size": size,
+                        "price": price,
+                        "executed": False,
+                        "status": "client_unavailable",
+                    })
+                    continue
+
+                try:
+                    resp = kalshi_client.place_order(
+                        ticker=m_key,
+                        side=outcome,
+                        action="buy",
+                        count=int(size),
+                        price_dollars=price,
+                        time_in_force="fill_or_kill",
+                        reducing=True,
+                    )
+                    order_obj = resp.get("order") if resp else None
+                    if order_obj:
+                        order_id = order_obj.get("order_id", "")
+                        self.record_rebalance_time(m_key, now)
+                        self.update_position(m_key, "kalshi", outcome, "buy", float(int(size)))
+                        if trade_db and hasattr(trade_db, "log_opportunity"):
+                            try:
+                                opp_id = trade_db.log_opportunity(
+                                    opp_type="InventoryRebalance",
+                                    market=m_key,
+                                    prices=json.dumps({f"{outcome}_ask": price}),
+                                    total_cost=est_cost,
+                                    net_profit=0.0,
+                                    net_roi=0.0,
+                                    depth=size,
+                                    action="executed",
+                                )
+                                if opp_id and hasattr(trade_db, "log_trade"):
+                                    trade_db.log_trade(
+                                        opportunity_id=opp_id,
+                                        platform="kalshi",
+                                        side="BUY",
+                                        price=price,
+                                        size=float(int(size)),
+                                        status="filled",
+                                        fill_price=price,
+                                        order_id=order_id,
+                                        outcome=outcome,
+                                    )
+                            except Exception as e:
+                                logger.debug("TradeDB error during live rebalance: %s", e)
+
+                        results.append({
+                            "market_key": m_key,
+                            "venue": venue,
+                            "action": "rebalance_buy",
+                            "outcome": outcome,
+                            "side": side,
+                            "size": float(int(size)),
+                            "price": price,
+                            "cost": est_cost,
+                            "status": "filled",
+                            "executed": True,
+                            "order_id": order_id,
+                        })
+                    else:
+                        results.append({
+                            "market_key": m_key,
+                            "venue": venue,
+                            "outcome": outcome,
+                            "size": size,
+                            "price": price,
+                            "executed": False,
+                            "status": "order_failed",
+                        })
+                except Exception as e:
+                    logger.error("Live Kalshi rebalance order failed for %s: %s", m_key, e)
+                    results.append({
+                        "market_key": m_key,
+                        "venue": venue,
+                        "outcome": outcome,
+                        "size": size,
+                        "price": price,
+                        "executed": False,
+                        "status": "exception",
+                        "error": str(e),
+                    })
+
+            elif venue == "polymarket":
+                if not polymarket_client:
+                    logger.error("Polymarket client unavailable for rebalance execution")
+                    results.append({
+                        "market_key": m_key,
+                        "venue": venue,
+                        "outcome": outcome,
+                        "size": size,
+                        "price": price,
+                        "executed": False,
+                        "status": "client_unavailable",
+                    })
+                    continue
+
+                try:
+                    # Token ID can be in proposal or retrieved from client
+                    token_id = prop.get("token_id", "")
+                    if not token_id and hasattr(polymarket_client, "get_token_id"):
+                        token_id = polymarket_client.get_token_id(m_key, outcome)
+                    if not token_id:
+                        token_id = m_key  # fallback if market_key is the token_id
+
+                    resp = polymarket_client.place_order(
+                        token_id=token_id,
+                        side="BUY",
+                        price=price,
+                        size=size,
+                        order_type="FOK",
+                    )
+                    if resp and resp.get("success"):
+                        order_id = resp.get("orderID", resp.get("order_id", ""))
+                        self.record_rebalance_time(m_key, now)
+                        self.update_position(m_key, "polymarket", outcome, "buy", size)
+                        if trade_db and hasattr(trade_db, "log_opportunity"):
+                            try:
+                                opp_id = trade_db.log_opportunity(
+                                    opp_type="InventoryRebalance",
+                                    market=m_key,
+                                    prices=json.dumps({f"{outcome}_ask": price}),
+                                    total_cost=est_cost,
+                                    net_profit=0.0,
+                                    net_roi=0.0,
+                                    depth=size,
+                                    action="executed",
+                                )
+                                if opp_id and hasattr(trade_db, "log_trade"):
+                                    trade_db.log_trade(
+                                        opportunity_id=opp_id,
+                                        platform="polymarket",
+                                        side="BUY",
+                                        price=price,
+                                        size=size,
+                                        status="filled",
+                                        fill_price=price,
+                                        order_id=order_id,
+                                        outcome=outcome,
+                                    )
+                            except Exception as e:
+                                logger.debug("TradeDB error during live Polymarket rebalance: %s", e)
+
+                        results.append({
+                            "market_key": m_key,
+                            "venue": venue,
+                            "action": "rebalance_buy",
+                            "outcome": outcome,
+                            "side": side,
+                            "size": size,
+                            "price": price,
+                            "cost": est_cost,
+                            "status": "filled",
+                            "executed": True,
+                            "order_id": order_id,
+                        })
+                    else:
+                        results.append({
+                            "market_key": m_key,
+                            "venue": venue,
+                            "outcome": outcome,
+                            "size": size,
+                            "price": price,
+                            "executed": False,
+                            "status": "order_failed",
+                        })
+                except Exception as e:
+                    logger.error("Live Polymarket rebalance order failed for %s: %s", m_key, e)
+                    results.append({
+                        "market_key": m_key,
+                        "venue": venue,
+                        "outcome": outcome,
+                        "size": size,
+                        "price": price,
+                        "executed": False,
+                        "status": "exception",
+                        "error": str(e),
+                    })
+
+        return results
+
 
     def check_trade_skew(
         self,
@@ -616,7 +989,12 @@ class InventoryBalancer:
                 from scans.helpers import _extract_levels_from_book
                 best_ask, ask_size, _, _ = _extract_levels_from_book(pm_book)
                 if best_ask is not None and best_ask > 0:
-                    quotes.append({"venue": "polymarket", "price": best_ask, "size": ask_size})
+                    quotes.append({
+                        "venue": "polymarket",
+                        "price": best_ask,
+                        "size": ask_size,
+                        "token_id": pm_book.get("asset_id") or pm_book.get("token_id") or market_key,
+                    })
 
         if not any(q["venue"] == "polymarket" for q in quotes) and price_cache:
             cached_pm = price_cache.get(("polymarket", market_key))
@@ -624,9 +1002,15 @@ class InventoryBalancer:
                 best_ask = cached_pm.get("best_ask")
                 ask_size = cached_pm.get("best_ask_size", 0)
                 if best_ask is not None and best_ask > 0:
-                    quotes.append({"venue": "polymarket", "price": best_ask, "size": ask_size or 0})
+                    quotes.append({
+                        "venue": "polymarket",
+                        "price": best_ask,
+                        "size": ask_size or 0,
+                        "token_id": cached_pm.get("token_id") or market_key,
+                    })
 
         return quotes
+
 
 
 # ---------------------------------------------------------------------------

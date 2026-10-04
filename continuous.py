@@ -2840,8 +2840,31 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                             )
                             for prop in proposals:
                                 logger.info("Inventory Rebalance Proposal: %s", prop.get("reason"))
+
+                            # Execute rebalancing proposals if automated rebalance is enabled
+                            if getattr(config, "INVENTORY_AUTO_REBALANCE_ENABLED", False):
+                                is_dry_run = getattr(args, "dry_run", True) or getattr(executor, "dry_run", True)
+                                rebal_results = inventory_balancer.execute_rebalancing_proposals(
+                                    proposals,
+                                    dry_run=is_dry_run,
+                                    kalshi_client=kalshi_client,
+                                    polymarket_client=pm_trader,
+                                    trade_db=executor.db,
+                                )
+                                for res in rebal_results:
+                                    if res.get("executed"):
+                                        logger.info(
+                                            "Executed auto-rebalance [%s]: %s %s %.1f @ %.3f on %s",
+                                            res.get("status"),
+                                            res.get("action", "buy"),
+                                            res.get("outcome", "").upper(),
+                                            res.get("size", 0.0),
+                                            res.get("price", 0.0),
+                                            res.get("venue", ""),
+                                        )
                     except Exception as exc:
                         logger.debug("InventoryBalancer evaluation failed: %s", exc)
+
 
                 # Apply filters
                 _pre_depth_count = len(all_opportunities)

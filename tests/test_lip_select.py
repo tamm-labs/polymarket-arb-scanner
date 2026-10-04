@@ -169,6 +169,50 @@ class TestSelectLipMarkets:
         assert out[0]["title"] == "GRID"
         assert out[0]["price_ranges"] == ranges
 
+    def test_filters_out_wide_spread(self):
+        programs = [_prog("WIDE_SPD", 100.0), _prog("TIGHT_SPD", 100.0)]
+        data = _data({"EV": [
+            {"ticker": "WIDE_SPD", "close_time": FUTURE},
+            {"ticker": "TIGHT_SPD", "close_time": FUTURE},
+        ]})
+        # WIDE: yes_ask=0.75, no_ask=0.65 -> yes_bid=0.35, spread=0.40 (40 cents)
+        # TIGHT: yes_ask=0.55, no_ask=0.55 -> yes_bid=0.45, spread=0.10 (10 cents)
+        client = _client(programs, prices={
+            "WIDE_SPD": (0.75, 0.65),
+            "TIGHT_SPD": (0.55, 0.55),
+        })
+        out = select_lip_markets(client, kalshi_data=data, max_spread_cents=25.0)
+        assert [o["ticker"] for o in out] == ["TIGHT_SPD"]
+        assert out[0]["spread_cents"] == 10.0
+
+    def test_filters_out_low_volume(self):
+        programs = [_prog("DEAD", 100.0), _prog("ACTIVE", 100.0)]
+        data = _data({"EV": [
+            {"ticker": "DEAD", "close_time": FUTURE, "volume_24h": 5.0},
+            {"ticker": "ACTIVE", "close_time": FUTURE, "volume_24h": 500.0},
+        ]})
+        client = _client(programs)
+        out = select_lip_markets(client, kalshi_data=data, min_volume=50.0)
+        assert [o["ticker"] for o in out] == ["ACTIVE"]
+        assert out[0]["volume_24h"] == 500.0
+
+    def test_volume_weight_boosts_liquid_market_score(self):
+        programs = [_prog("LOW_VOL", 100.0), _prog("HIGH_VOL", 100.0)]
+        data = _data({"EV": [
+            {"ticker": "LOW_VOL", "close_time": FUTURE, "volume_24h": 0.0},
+            {"ticker": "HIGH_VOL", "close_time": FUTURE, "volume_24h": 1000.0},
+        ]})
+        client = _client(programs)
+        out = select_lip_markets(client, kalshi_data=data, volume_weight=0.25)
+        assert len(out) == 2
+        assert out[0]["ticker"] == "HIGH_VOL"
+        assert out[1]["ticker"] == "LOW_VOL"
+        assert out[0]["base_score"] == pytest.approx(100.0)
+        assert out[0]["score"] > out[1]["score"]
+        assert out[0]["volume_factor"] > 1.0
+        assert out[1]["volume_factor"] == 1.0
+
+
 
 if __name__ == "__main__":
     import unittest

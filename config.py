@@ -377,6 +377,10 @@ INVENTORY_BALANCER_ENABLED = _env_bool("INVENTORY_BALANCER_ENABLED", "true")
 INVENTORY_MAX_DELTA_CONTRACTS = _env_float("INVENTORY_MAX_DELTA_CONTRACTS", "50.0")
 INVENTORY_MAX_IMBALANCE_RATIO = _env_float("INVENTORY_MAX_IMBALANCE_RATIO", "0.5")
 INVENTORY_REBALANCE_MAX_COST = _env_float("INVENTORY_REBALANCE_MAX_COST", "25.0")
+INVENTORY_AUTO_REBALANCE_ENABLED = _env_bool("INVENTORY_AUTO_REBALANCE_ENABLED", "false")
+INVENTORY_REBALANCE_COOLDOWN_SEC = _env_float("INVENTORY_REBALANCE_COOLDOWN_SEC", "60.0")
+INVENTORY_REBALANCE_MIN_IMBALANCE_RATIO = _env_float("INVENTORY_REBALANCE_MIN_IMBALANCE_RATIO", "0.4")
+
 
 # Fee promotional arbitrage (Strategy #9).
 # When enabled, cross-platform near-misses (within PROMO_NEAR_MISS_BAND of
@@ -834,6 +838,19 @@ MM_SKEW_SPREAD_ENABLED = _env_bool("MM_SKEW_SPREAD_ENABLED", "true")
 MM_SKEW_SPREAD_FACTOR = _env_float("MM_SKEW_SPREAD_FACTOR", "1.0")
 MM_SKEW_SPREAD_MAX_MULTIPLIER = _env_float("MM_SKEW_SPREAD_MAX_MULTIPLIER", "3.0")
 MM_CROSS_VENUE_SKEW_ENABLED = _env_bool("MM_CROSS_VENUE_SKEW_ENABLED", "true")
+
+# Portfolio-Level Margin & Aggregate Exposure Guard
+MM_PORTFOLIO_GUARD_ENABLED = _env_bool("MM_PORTFOLIO_GUARD_ENABLED", "true")
+MM_MAX_PORTFOLIO_NOTIONAL_USD = _env_float("MM_MAX_PORTFOLIO_NOTIONAL_USD", "500.0")
+MM_MAX_PORTFOLIO_MARGIN_UTILIZATION = _env_float("MM_MAX_PORTFOLIO_MARGIN_UTILIZATION", "0.80")
+
+# Dynamic Market Selection for MM Pilot via LIP Rewards & Volume
+MM_DYNAMIC_SELECTION_ENABLED = _env_bool("MM_DYNAMIC_SELECTION_ENABLED", "true")
+MM_SELECTION_REFRESH_INTERVAL_SEC = _env_float("MM_SELECTION_REFRESH_INTERVAL_SEC", "1800.0")
+MM_MIN_24H_VOLUME = _env_float("MM_MIN_24H_VOLUME", "0.0")
+MM_MAX_SPREAD_CENTS = _env_float("MM_MAX_SPREAD_CENTS", "0.0")
+MM_VOLUME_WEIGHT = _env_float("MM_VOLUME_WEIGHT", "0.20")
+
 
 # Kill switch / control plane (spec section 7). Fail closed: a cache older
 # than MM_CONTROLS_MAX_STALE_SECONDS means unknown operator intent = off.
@@ -1411,6 +1428,7 @@ def validate_config() -> list[str]:
         "CTF_MAX_TRADE_SIZE": CTF_MAX_TRADE_SIZE,
         "INVENTORY_MAX_DELTA_CONTRACTS": INVENTORY_MAX_DELTA_CONTRACTS,
         "INVENTORY_REBALANCE_MAX_COST": INVENTORY_REBALANCE_MAX_COST,
+        "MM_MAX_PORTFOLIO_NOTIONAL_USD": MM_MAX_PORTFOLIO_NOTIONAL_USD,
     }
     for name, val in _positive.items():
         if not math.isfinite(val) or val <= 0:
@@ -1419,6 +1437,36 @@ def validate_config() -> list[str]:
     if not (0 < INVENTORY_MAX_IMBALANCE_RATIO <= 1):
         raise ConfigError(
             f"INVENTORY_MAX_IMBALANCE_RATIO={INVENTORY_MAX_IMBALANCE_RATIO} must be in (0, 1]")
+
+    if INVENTORY_REBALANCE_COOLDOWN_SEC < 0:
+        raise ConfigError(
+            f"INVENTORY_REBALANCE_COOLDOWN_SEC={INVENTORY_REBALANCE_COOLDOWN_SEC} must be >= 0")
+
+    if not (0 < INVENTORY_REBALANCE_MIN_IMBALANCE_RATIO <= 1):
+        raise ConfigError(
+            f"INVENTORY_REBALANCE_MIN_IMBALANCE_RATIO={INVENTORY_REBALANCE_MIN_IMBALANCE_RATIO} must be in (0, 1]")
+
+    if not (0 < MM_MAX_PORTFOLIO_MARGIN_UTILIZATION <= 1):
+        raise ConfigError(
+            f"MM_MAX_PORTFOLIO_MARGIN_UTILIZATION={MM_MAX_PORTFOLIO_MARGIN_UTILIZATION} must be in (0, 1]")
+
+    if MM_SELECTION_REFRESH_INTERVAL_SEC < 10.0:
+        raise ConfigError(
+            f"MM_SELECTION_REFRESH_INTERVAL_SEC={MM_SELECTION_REFRESH_INTERVAL_SEC} must be >= 10.0")
+
+    if MM_MIN_24H_VOLUME < 0:
+        raise ConfigError(
+            f"MM_MIN_24H_VOLUME={MM_MIN_24H_VOLUME} must be >= 0")
+
+    if MM_MAX_SPREAD_CENTS < 0:
+        raise ConfigError(
+            f"MM_MAX_SPREAD_CENTS={MM_MAX_SPREAD_CENTS} must be >= 0")
+
+    if MM_VOLUME_WEIGHT < 0:
+        raise ConfigError(
+            f"MM_VOLUME_WEIGHT={MM_VOLUME_WEIGHT} must be >= 0")
+
+
 
     # Plan 10 non-negative keys (zero is a valid value for these)
     if MM_INVENTORY_TARGET_USD < 0:

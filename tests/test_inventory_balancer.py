@@ -54,6 +54,23 @@ class TestInventoryBalancerConfig:
             with pytest.raises(cfg.ConfigError, match="INVENTORY_REBALANCE_MAX_COST=0.0 must be > 0"):
                 cfg.validate_config()
 
+    def test_validate_config_rejects_negative_cooldown(self):
+        """validate_config rejects INVENTORY_REBALANCE_COOLDOWN_SEC < 0."""
+        with patch.object(cfg, "INVENTORY_REBALANCE_COOLDOWN_SEC", -5.0):
+            with pytest.raises(cfg.ConfigError, match="INVENTORY_REBALANCE_COOLDOWN_SEC=-5.0 must be >= 0"):
+                cfg.validate_config()
+
+    def test_validate_config_rejects_invalid_min_imbalance_ratio(self):
+        """validate_config rejects INVENTORY_REBALANCE_MIN_IMBALANCE_RATIO <= 0 or > 1."""
+        with patch.object(cfg, "INVENTORY_REBALANCE_MIN_IMBALANCE_RATIO", 0.0):
+            with pytest.raises(cfg.ConfigError, match="INVENTORY_REBALANCE_MIN_IMBALANCE_RATIO=0.0 must be in \\(0, 1\\]"):
+                cfg.validate_config()
+
+        with patch.object(cfg, "INVENTORY_REBALANCE_MIN_IMBALANCE_RATIO", 1.2):
+            with pytest.raises(cfg.ConfigError, match="INVENTORY_REBALANCE_MIN_IMBALANCE_RATIO=1.2 must be in \\(0, 1\\]"):
+                cfg.validate_config()
+
+
 
 class TestInventoryBalancerDeltaTracking:
     """Test delta calculation and multi-platform inventory aggregation."""
@@ -406,3 +423,216 @@ class TestInventoryBalancerSkewMetricsAndSingleton:
         assert balancer._resolve_market_key("kxhighny-26sep28-t75") == "KXHIGHNY-26SEP28-T75"
         # Substring "KX" should NOT falsely match "KXHIGHNY-26SEP28-T75"
         assert balancer._resolve_market_key("KX") == "KX"
+
+
+class TestAutomatedInventoryRebalanceExecution:
+    """Test automated rebalancing execution, safety guards, and dry-run/live paths."""
+
+    def test_cooldown_tracking_and_expiry(self):
+        """Rebalance cooldown is enforced per market and expires after configured interval."""
+        balancer = InventoryBalancer(rebalance_cooldown_sec=60.0)
+        assert balancer.is_cooldown_active("market_1", now=1000.0) is False
+
+        balancer.record_rebalance_time("market_1", timestamp=1000.0)
+        # Cooldown active inside 60s
+        assert balancer.is_cooldown_active("market_1", now=1030.0) is True
+        # Cooldown expired after 60s
+        assert balancer.is_cooldown_active("market_1", now=1061.0) is False
+
+    def test_execute_rebalancing_dry_run_records_trades_and_cooldown(self):
+        """Dry-run execution logs opportunity and trade to TradeDB and activates cooldown."""
+        balancer = InventoryBalancer(rebalance_cooldown_sec=60.0)
+        mock_db = MagicMock()
+        mock_db.log_opportunity.return_value = 42
+
+        proposals = [{
+            "market_key": "KXTEST-26SEP28",
+            "action": "rebalance_buy",
+            "target_venue": "kalshi",
+            "side": "buy",
+            "outcome": "no",
+            "size": 20.0,
+            "price": 0.45,
+            "estimated_cost": 9.0,
+            "current_delta": 40.0,
+            "projected_delta": 20.0,
+            "reason": "Deficient NO: buying 20.0 NO on kalshi @ 0.45",
+        }]
+
+        results = balancer.execute_rebalancing_proposals(
+            proposals,
+            dry_run=True,
+            trade_db=mock_db,
+        )
+
+        assert len(results) == 1
+        res = results[0]
+        assert res["executed"] is True
+        assert res["status"] == "dry_run"
+        assert res["market_key"] == "KXTEST-26SEP28"
+        assert res["size"] == 20.0
+        assert res["cost"] == 9.0
+
+        # DB logged
+        mock_db.log_opportunity.assert_called_once()
+        mock_db.log_trade.assert_called_once()
+        assert mock_db.log_trade.call_args[1]["platform"] == "kalshi"
+        assert mock_db.log_trade.call_args[1]["side"] == "BUY"
+        assert mock_db.log_trade.call_args[1]["status"] == "dry_run"
+
+        # Cooldown is now active for KXTEST-26SEP28
+        assert balancer.is_cooldown_active("KXTEST-26SEP28") is True
+
+    def test_execute_rebalancing_skips_when_cooldown_active(self):
+        """Active cooldown causes proposal to be skipped."""
+        balancer = InventoryBalancer(rebalance_cooldown_sec=60.0)
+        balancer.record_rebalance_time("KXTEST-26SEP28")
+
+        proposals = [{
+            "market_key": "KXTEST-26SEP28",
+            "action": "rebalance_buy",
+            "target_venue": "kalshi",
+            "side": "buy",
+            "outcome": "no",
+            "size": 15.0,
+            "price": 0.50,
+            "estimated_cost": 7.5,
+        }]
+
+        results = balancer.execute_rebalancing_proposals(proposals, dry_run=True)
+        assert len(results) == 1
+        assert results[0]["executed"] is False
+        assert results[0]["status"] == "cooldown_active"
+
+    def test_execute_rebalancing_cost_cap_exceeded(self):
+        """Proposal exceeding max_rebalance_cost is skipped."""
+        balancer = InventoryBalancer(max_rebalance_cost=25.0)
+
+        proposals = [{
+            "market_key": "KXTEST-26SEP28",
+            "action": "rebalance_buy",
+            "target_venue": "kalshi",
+            "side": "buy",
+            "outcome": "yes",
+            "size": 100.0,
+            "price": 0.50,
+            "estimated_cost": 50.0,  # exceeds $25
+        }]
+
+        results = balancer.execute_rebalancing_proposals(proposals, dry_run=True)
+        assert len(results) == 1
+        assert results[0]["executed"] is False
+        assert results[0]["status"] == "cost_cap_exceeded"
+
+    def test_execute_rebalancing_kalshi_live_blocked_by_policy(self):
+        """Live Kalshi order is blocked fail-closed when live_kalshi_submit_allowed is False."""
+        balancer = InventoryBalancer()
+        mock_kalshi = MagicMock()
+
+        proposals = [{
+            "market_key": "KXTEST-26SEP28",
+            "action": "rebalance_buy",
+            "target_venue": "kalshi",
+            "side": "buy",
+            "outcome": "no",
+            "size": 10.0,
+            "price": 0.40,
+            "estimated_cost": 4.0,
+        }]
+
+        with patch("kalshi_policy.live_kalshi_submit_allowed", return_value=False):
+            results = balancer.execute_rebalancing_proposals(
+                proposals,
+                dry_run=False,
+                kalshi_client=mock_kalshi,
+            )
+
+        assert len(results) == 1
+        assert results[0]["executed"] is False
+        assert results[0]["status"] == "blocked_by_policy"
+        mock_kalshi.place_order.assert_not_called()
+
+    def test_execute_rebalancing_kalshi_live_success(self):
+        """Live Kalshi order places successfully when policy allows it."""
+        balancer = InventoryBalancer()
+        mock_kalshi = MagicMock()
+        mock_kalshi.place_order.return_value = {
+            "order": {"order_id": "k_order_999", "status": "executed"}
+        }
+        mock_db = MagicMock()
+        mock_db.log_opportunity.return_value = 101
+
+        proposals = [{
+            "market_key": "KXTEST-26SEP28",
+            "action": "rebalance_buy",
+            "target_venue": "kalshi",
+            "side": "buy",
+            "outcome": "no",
+            "size": 10.0,
+            "price": 0.40,
+            "estimated_cost": 4.0,
+        }]
+
+        with patch("kalshi_policy.live_kalshi_submit_allowed", return_value=True):
+            results = balancer.execute_rebalancing_proposals(
+                proposals,
+                dry_run=False,
+                kalshi_client=mock_kalshi,
+                trade_db=mock_db,
+            )
+
+        assert len(results) == 1
+        res = results[0]
+        assert res["executed"] is True
+        assert res["status"] == "filled"
+        assert res["order_id"] == "k_order_999"
+
+        # Position updated in balancer
+        assert balancer.get_delta("KXTEST-26SEP28") == -10.0
+
+        # DB logged filled trade
+        mock_db.log_trade.assert_called_once()
+        assert mock_db.log_trade.call_args[1]["status"] == "filled"
+
+    def test_execute_rebalancing_polymarket_live_success(self):
+        """Live Polymarket order places successfully with valid client."""
+        balancer = InventoryBalancer()
+        mock_pm = MagicMock()
+        mock_pm.place_order.return_value = {"success": True, "orderID": "pm_order_888"}
+        mock_db = MagicMock()
+        mock_db.log_opportunity.return_value = 102
+
+        proposals = [{
+            "market_key": "0xpm_condition_abc",
+            "token_id": "tok_123",
+            "action": "rebalance_buy",
+            "target_venue": "polymarket",
+            "side": "buy",
+            "outcome": "yes",
+            "size": 25.0,
+            "price": 0.60,
+            "estimated_cost": 15.0,
+        }]
+
+        results = balancer.execute_rebalancing_proposals(
+            proposals,
+            dry_run=False,
+            polymarket_client=mock_pm,
+            trade_db=mock_db,
+        )
+
+        assert len(results) == 1
+        res = results[0]
+        assert res["executed"] is True
+        assert res["status"] == "filled"
+        assert res["order_id"] == "pm_order_888"
+
+        # Position updated in balancer
+        assert balancer.get_delta("0xpm_condition_abc") == 25.0
+        mock_pm.place_order.assert_called_once_with(
+            token_id="tok_123",
+            side="BUY",
+            price=0.60,
+            size=25.0,
+            order_type="FOK",
+        )

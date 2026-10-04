@@ -272,6 +272,55 @@ class TestValidateConfig:
         with pytest.raises(ValueError, match="MM_SKEW_SPREAD_MAX_MULTIPLIER.*must be >= 1.0"):
             _reload_config()
 
+    def test_mm_portfolio_guard_config_defaults(self):
+        cfg = _reload_config()
+        assert cfg.MM_PORTFOLIO_GUARD_ENABLED is True
+        assert cfg.MM_MAX_PORTFOLIO_NOTIONAL_USD == 500.0
+        assert cfg.MM_MAX_PORTFOLIO_MARGIN_UTILIZATION == 0.80
+
+    def test_mm_portfolio_guard_config_validation(self, monkeypatch):
+        monkeypatch.setenv("MM_MAX_PORTFOLIO_NOTIONAL_USD", "0")
+        with pytest.raises(ValueError, match="MM_MAX_PORTFOLIO_NOTIONAL_USD.*must be > 0"):
+            _reload_config()
+
+        monkeypatch.setenv("MM_MAX_PORTFOLIO_NOTIONAL_USD", "500.0")
+        monkeypatch.setenv("MM_MAX_PORTFOLIO_MARGIN_UTILIZATION", "0")
+        with pytest.raises(ValueError, match="MM_MAX_PORTFOLIO_MARGIN_UTILIZATION.*must be in \\(0, 1\\]"):
+            _reload_config()
+
+        monkeypatch.setenv("MM_MAX_PORTFOLIO_MARGIN_UTILIZATION", "1.5")
+        with pytest.raises(ValueError, match="MM_MAX_PORTFOLIO_MARGIN_UTILIZATION.*must be in \\(0, 1\\]"):
+            _reload_config()
+
+    def test_mm_dynamic_selection_config_defaults(self):
+        cfg = _reload_config()
+        assert cfg.MM_DYNAMIC_SELECTION_ENABLED is True
+        assert cfg.MM_SELECTION_REFRESH_INTERVAL_SEC == 1800.0
+        assert cfg.MM_MIN_24H_VOLUME == 0.0
+        assert cfg.MM_MAX_SPREAD_CENTS == 0.0
+        assert cfg.MM_VOLUME_WEIGHT == 0.20
+
+    def test_mm_dynamic_selection_config_validation(self, monkeypatch):
+        monkeypatch.setenv("MM_SELECTION_REFRESH_INTERVAL_SEC", "5.0")
+        with pytest.raises(ValueError, match="MM_SELECTION_REFRESH_INTERVAL_SEC.*must be >= 10.0"):
+            _reload_config()
+
+        monkeypatch.setenv("MM_SELECTION_REFRESH_INTERVAL_SEC", "1800.0")
+        monkeypatch.setenv("MM_MIN_24H_VOLUME", "-1.0")
+        with pytest.raises(ValueError, match="MM_MIN_24H_VOLUME.*must be >= 0"):
+            _reload_config()
+
+        monkeypatch.setenv("MM_MIN_24H_VOLUME", "0.0")
+        monkeypatch.setenv("MM_MAX_SPREAD_CENTS", "-0.1")
+        with pytest.raises(ValueError, match="MM_MAX_SPREAD_CENTS.*must be >= 0"):
+            _reload_config()
+
+        monkeypatch.setenv("MM_MAX_SPREAD_CENTS", "0.0")
+        monkeypatch.setenv("MM_VOLUME_WEIGHT", "-0.1")
+        with pytest.raises(ValueError, match="MM_VOLUME_WEIGHT.*must be >= 0"):
+            _reload_config()
+
+
     @pytest.mark.parametrize("name,value", [
         ("LIP_MIN_POOL", "-0.01"),
         ("LIP_MAX_MARKETS", "0"),

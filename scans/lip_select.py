@@ -12,7 +12,8 @@ the same current incentive-program data and eligibility filters.
 """
 
 import logging
-from datetime import datetime, timedelta, timezone
+import math
+from datetime import datetime, timezone
 
 from config import (
     LIP_MIN_POOL,
@@ -22,6 +23,9 @@ from config import (
     LIP_PRICE_BAND_HIGH,
     LIP_MIN_HOURS_REMAINING,
     LIP_DEPTH_PROBE_LIMIT,
+    MM_MIN_24H_VOLUME,
+    MM_MAX_SPREAD_CENTS,
+    MM_VOLUME_WEIGHT,
 )
 from kalshi_policy import event_blocked
 from .kalshi import _fetch_kalshi_data
@@ -73,7 +77,10 @@ def _yes_mid_from_asks(yes_ask: float | None, no_ask: float | None) -> float | N
 
 
 def select_lip_markets(kalshi_client, kalshi_data: tuple | None = None,
-                       max_markets: int | None = None) -> list[dict]:
+                       max_markets: int | None = None,
+                       min_volume: float | None = None,
+                       max_spread_cents: float | None = None,
+                       volume_weight: float | None = None) -> list[dict]:
     """Rank active LIP pools and return the top-N quotable markets.
 
     Filters (per docs/plans/02-kalshi-lip-mm-scope.md §2):
@@ -83,16 +90,23 @@ def select_lip_markets(kalshi_client, kalshi_data: tuple | None = None,
       3. program end AND market close both >= LIP_MIN_HOURS_REMAINING out
       4. mid price inside [LIP_PRICE_BAND_LOW, LIP_PRICE_BAND_HIGH] — tails
          carry binary gap risk disproportionate to reward
-      5. competition proxy: resting depth at best on both sides; score =
-         pool / (1 + depth) so thin books rank higher
+      5. spread <= MM_MAX_SPREAD_CENTS — avoid wide, illiquid books
+      6. volume_24h >= MM_MIN_24H_VOLUME — filter out dead markets
+      7. competition proxy & volume-weighted score:
+         base_score = pool / (1 + depth)
+         score = base_score * (1 + volume_weight * log10(1 + volume_24h))
 
     Returns list of dicts sorted by score desc:
-        {ticker, title, pool_dollars, category, mid, competition_depth, score,
+        {ticker, title, pool_dollars, category, mid, spread_cents, volume_24h,
+         competition_depth, base_score, volume_factor, score,
          discount_factor_bps, program_end, market_close_hours, price_ranges}
     """
     if not kalshi_client:
         return []
     limit = max_markets or LIP_MAX_MARKETS
+    eff_min_vol = MM_MIN_24H_VOLUME if min_volume is None else min_volume
+    eff_max_spread = MM_MAX_SPREAD_CENTS if max_spread_cents is None else max_spread_cents
+    eff_vol_wt = MM_VOLUME_WEIGHT if volume_weight is None else volume_weight
 
     programs = kalshi_client.fetch_incentive_programs(
         status="active", incentive_type="liquidity")
@@ -148,7 +162,7 @@ def select_lip_markets(kalshi_client, kalshi_data: tuple | None = None,
 
     excluded = {c.strip().lower() for c in LIP_EXCLUDED_CATEGORIES if c.strip()}
     candidates = []
-    skipped = {"pool": 0, "category": 0, "policy": 0, "duration": 0, "band": 0, "unknown": 0}
+    skipped = {"pool": 0, "category": 0, "policy": 0, "duration": 0, "band": 0, "spread": 0, "volume": 0, "unknown": 0}
     for ticker, pool in pools.items():
         if pool["pool_dollars"] < LIP_MIN_POOL:
             skipped["pool"] += 1
@@ -175,12 +189,29 @@ def select_lip_markets(kalshi_client, kalshi_data: tuple | None = None,
         if mid is None or not (LIP_PRICE_BAND_LOW <= mid <= LIP_PRICE_BAND_HIGH):
             skipped["band"] += 1
             continue
+
+        # Spread filter
+        yes_bid = 1.0 - no_ask
+        spread = max(0.0, round(yes_ask - yes_bid, 4))
+        spread_cents = round(spread * 100.0, 1)
+        if eff_max_spread is not None and eff_max_spread > 0 and spread_cents > eff_max_spread:
+            skipped["spread"] += 1
+            continue
+
+        # Volume filter (24h contract volume)
+        vol_24h = float(market.get("volume_24h") or market.get("volume") or 0.0)
+        if eff_min_vol is not None and eff_min_vol > 0 and vol_24h < eff_min_vol:
+            skipped["volume"] += 1
+            continue
+
         candidates.append({
             "ticker": ticker,
             "title": market.get("title") or ticker,
             "pool_dollars": round(pool["pool_dollars"], 2),
             "category": category,
             "mid": mid,
+            "spread_cents": spread_cents,
+            "volume_24h": vol_24h,
             "target_size": pool.get("target_size"),
             "discount_factor_bps": pool["discount_factor_bps"],
             "program_end": pool["program_end"],
@@ -196,7 +227,13 @@ def select_lip_markets(kalshi_client, kalshi_data: tuple | None = None,
         depth = kalshi_client.get_order_book_depth(c["ticker"]) or {}
         competition = depth.get("yes_ask_size", 0) + depth.get("no_ask_size", 0)
         c["competition_depth"] = competition
-        c["score"] = c["pool_dollars"] / (1.0 + competition)
+        base_score = c["pool_dollars"] / (1.0 + competition)
+        c["base_score"] = round(base_score, 2)
+        # Volume weighting bonus: boosts liquid markets
+        vol = c["volume_24h"]
+        vol_factor = 1.0 + eff_vol_wt * min(3.0, math.log10(1.0 + vol)) if eff_vol_wt > 0 else 1.0
+        c["volume_factor"] = round(vol_factor, 3)
+        c["score"] = round(base_score * vol_factor, 2)
         probed.append(c)
 
     probed.sort(key=lambda c: c["score"], reverse=True)
@@ -207,7 +244,8 @@ def select_lip_markets(kalshi_client, kalshi_data: tuple | None = None,
         len(programs), len(pools), len(candidates), len(selected), skipped,
     )
     for c in selected:
-        logger.info("  LIP pick: %s pool=$%.0f cat=%s mid=%.2f depth=%d score=%.2f",
+        logger.info("  LIP pick: %s pool=$%.0f cat=%s mid=%.2f vol=%.0f spread=%.1fc depth=%d score=%.2f",
                     c["ticker"], c["pool_dollars"], c["category"] or "?",
-                    c["mid"], c["competition_depth"], c["score"])
+                    c["mid"], c.get("volume_24h", 0.0), c.get("spread_cents", 0.0),
+                    c["competition_depth"], c["score"])
     return selected

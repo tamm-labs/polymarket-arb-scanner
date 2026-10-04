@@ -1437,7 +1437,13 @@ def main():
         action="store_true",
         help="Print historical performance analysis and exit",
     )
+    parser.add_argument(
+        "--auto-rebalance",
+        action="store_true",
+        help="Enable automated execution of inventory rebalancing proposals",
+    )
     args = parser.parse_args()
+
 
     # Configure logging first (before any logger calls)
     setup_logging(level=args.log_level, log_file=args.log_file)
@@ -1458,6 +1464,10 @@ def main():
     dry_run = args.dry_run if args.dry_run is not None else os.getenv("DRY_RUN", "true").lower() == "true"
     exec_mode = args.exec_mode or os.getenv("EXECUTION_MODE", "semi-auto")
     max_trade = args.max_trade or float(os.getenv("MAX_TRADE_SIZE", "5.0"))
+
+    if args.auto_rebalance:
+        config.INVENTORY_AUTO_REBALANCE_ENABLED = True
+
 
     if args.mode == config.RESEARCH_MODE and not (dry_run and config.DRY_RUN and args.continuous):
         logger.error("--mode research is observational: it requires --continuous and DRY_RUN=true.")
