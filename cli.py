@@ -1057,26 +1057,6 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
             except Exception as e:
                 logger.error("Limitless rewards scan failed: %s", e)
 
-    # Jev System One Crypto Decision Scan
-    if args.mode in ("all", "jev-crypto"):
-        from config import JEV_CRYPTO_ENABLED, OPENROUTER_API_KEY
-        if (args.mode == "jev-crypto") or (JEV_CRYPTO_ENABLED and OPENROUTER_API_KEY):
-            logger.info("--- Jev System One Crypto Scan ---")
-            try:
-                from scans.jev_crypto import scan_jev_crypto
-                markets_by_key = {}
-                if poly_markets:
-                    for mkt in poly_markets:
-                        cid = mkt.get("condition_id", "") or mkt.get("conditionId", "") or mkt.get("question", "")
-                        if cid:
-                            markets_by_key[cid] = mkt
-                is_forced = (args.mode == "jev-crypto")
-                jev_opps = scan_jev_crypto(markets_by_key, min_profit=min_profit, db=db, force=is_forced)
-                all_opportunities.extend(jev_opps)
-                logger.info("Found %d Jev crypto opportunities.", len(jev_opps))
-            except Exception as e:
-                logger.error("Jev crypto scan failed: %s", e)
-
     # Filter by minimum depth if specified
     if args.min_depth > 0:
         before = len(all_opportunities)
@@ -1360,10 +1340,10 @@ def main():
                  "imbalance", "news-snipe", "correlated", "time-decay",
                  "logical-arb", "whale-copy",
                  "fee-promo", "cross-mm",
-                 "lead-lag-mm", "toxic-flow", "vol-mm", "mm-pilot", "jev-crypto", "frechet", "temporal", "ctf",
+                 "lead-lag-mm", "toxic-flow", "vol-mm", "mm-pilot", "frechet", "temporal", "ctf",
                  "research"],
         default="all",
-        help="Scan mode: all, binary, negrisk, negrisk-no, cross, kalshi, cross-all, spread, betfair, smarkets, sxbet, matchbook, gemini, ibkr, event, triangular, stale, resolution, convergence, mm, mm-pilot, rewards, limitless-rewards, imbalance, news-snipe, correlated, time-decay, fee-promo, cross-mm, jev-crypto, frechet, temporal, ctf, research (dry-run Kalshi + Fréchet + temporal + CTF)",
+        help="Scan mode: all, binary, negrisk, negrisk-no, cross, kalshi, cross-all, spread, betfair, smarkets, sxbet, matchbook, gemini, ibkr, event, triangular, stale, resolution, convergence, mm, mm-pilot, rewards, limitless-rewards, imbalance, news-snipe, correlated, time-decay, fee-promo, cross-mm, frechet, temporal, ctf, research (dry-run Kalshi + Fréchet + temporal + CTF)",
     )
     parser.add_argument(
         "--min-profit",

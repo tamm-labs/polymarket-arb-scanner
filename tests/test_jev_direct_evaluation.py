@@ -135,28 +135,14 @@ class TestSemanticEvidenceBoundaries:
         assert polymarket_refs([{"id": "a", "question": "test", "description": "full rules"}])[0].rules == "full rules"
         assert kalshi_refs([{"ticker": "a", "title": "test", "rules_primary": "full rules"}])[0].rules == "full rules"
 
-    def test_live_crypto_execution_is_rejected_before_any_pipeline(self):
+    def test_live_jev_research_execution_is_rejected_before_any_pipeline(self):
         from executor import ArbitrageExecutor
         executor = object.__new__(ArbitrageExecutor)
         executor.dry_run = False
         executor._log_skipped = MagicMock()
-        assert executor.execute({"type": "JevCrypto"}) is False
         assert executor.execute({"type": "anything", "_research_only": True}) is False
         assert executor.execute({"type": "NewsSnipe", "_sentiment_source": "jev"}) is False
-        assert executor._log_skipped.call_count == 3
-
-    def test_missing_rules_and_expiry_do_not_call_model(self):
-        from scans.jev_crypto import scan_jev_crypto
-        client = MagicMock()
-        market = {"question": "Will Bitcoin reach $90,000?", "outcomePrices": '["0.4","0.6"]',
-                  "clobTokenIds": ["yes", "no"], "description": "YES if index X reaches barrier.",
-                  "endDate": "invalid"}
-        spots = {"BTC": {"price": 81000, "change_24h": 1, "vwap_24h": 80000}}
-        with patch("scans.jev_crypto._fetch_clob_for_market", return_value={"yes_ask": 0.4, "no_ask": 0.6}):
-            assert scan_jev_crypto({"m": market}, spot_prices=spots, jev_client=client, force=True) == []
-            market.update(endDate="2099-01-01T00:00:00Z", description="")
-            assert scan_jev_crypto({"m": market}, spot_prices=spots, jev_client=client, force=True) == []
-        client.query_decisions.assert_not_called()
+        assert executor._log_skipped.call_count == 2
 
 
 class TestResolutionSync:
@@ -182,28 +168,3 @@ class TestResolutionSync:
             assert details["resolution_checked_at"] == record["resolved_at"]
         finally:
             db.close()
-
-
-class TestPaperAcceptanceFailures:
-    @pytest.mark.parametrize("failure", ["clob", "provider", "unprofitable"])
-    def test_failed_or_unprofitable_candidate_emits_no_opportunity(self, failure):
-        from scans.jev_crypto import _refine_jev_crypto_with_clob
-        market = {"question": "Will Bitcoin reach $90,000?", "clobTokenIds": ["yes", "no"],
-                  "description": "YES if index X reaches 90000 before expiry.",
-                  "endDate": "2099-01-01T00:00:00Z"}
-        candidate = {"market": market, "market_key": "m", "asset": "BTC", "strike": 90000,
-                     "direction": "reach", "spot_info": {"price": 81000, "change_24h": 1, "vwap_24h": 80000}}
-        client = MagicMock()
-        client.query_decisions.return_value = {"answers": {
-            "strike_probability": {"noul": 0.5},
-            "contract_interpretation": {"choice": "touch_above", "confidence": 0.99},
-            "tail_risk": {"score": 1}, "conviction": {"score": 1}}}
-        if failure == "provider":
-            client.query_decisions.side_effect = JevError("test failure")
-        quotes = None if failure == "clob" else {"yes_ask": 0.6, "no_ask": 0.6}
-        with patch("scans.jev_crypto._fetch_clob_for_market", return_value=quotes):
-            assert _refine_jev_crypto_with_clob([candidate], client=client) == []
-        if failure == "clob":
-            client.query_decisions.assert_not_called()
-        else:
-            client.query_decisions.assert_called_once()

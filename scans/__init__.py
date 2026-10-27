@@ -38,7 +38,6 @@ from scans.social_sentiment import scan_social_sentiment
 from scans.expert_divergence import scan_expert_divergence
 from scans.insider_pattern import scan_insider_pattern, get_order_flow_tracker
 from scans.cross_category import scan_cross_category, get_signal_fetcher
-from scans.jev_crypto import scan_jev_crypto, _refine_jev_crypto_with_clob
 from scans.frechet import scan_frechet, _refine_frechet_with_clob
 from scans.temporal import scan_temporal_arb, _refine_temporal_with_clob
 from scans.ctf import scan_ctf, _refine_ctf_with_clob
@@ -103,8 +102,6 @@ __all__ = [
     "get_order_flow_tracker",
     "scan_cross_category",
     "get_signal_fetcher",
-    "scan_jev_crypto",
-    "_refine_jev_crypto_with_clob",
     "scan_frechet",
     "_refine_frechet_with_clob",
     "scan_temporal_arb",

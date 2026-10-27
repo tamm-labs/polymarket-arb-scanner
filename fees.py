@@ -2273,58 +2273,6 @@ def net_profit_cross_category(
 
 
 # ---------------------------------------------------------------------------
-# Jev System One Decision Fee Calculation
-# ---------------------------------------------------------------------------
-
-
-def net_profit_jev_crypto(
-    price: float,
-    model_prob: float,
-    size: float = 10.0,
-    category: str = "crypto",
-) -> dict:
-    """Calculate net expected profit for a Jev-directed crypto execution.
-
-    Args:
-        price: Execution price for the token in [0, 1] (buy Yes or buy No).
-        model_prob: Calibrated true probability estimated by Jev in [0, 1].
-        size: Notional trade size in USD.
-        category: Market category on Polymarket (default 'crypto' = 7% taker fee).
-
-    Returns:
-        Dict with total_cost, fees, gross_profit, net_profit, and net_roi.
-    """
-    if price <= 0.0 or price >= 1.0 or size <= 0:
-        return {
-            "total_cost": 0.0,
-            "fees": 0.0,
-            "gross_profit": 0.0,
-            "net_profit": 0.0,
-            "net_roi": 0.0,
-        }
-
-    contracts = size / price
-    # Taker fee at entry: rate * C * P * (1 - P)
-    fee = polymarket_taker_fee(price, contracts=contracts, category=category)
-    gas = POLYGON_GAS_ESTIMATE
-
-    # Expected value at expiration: model_prob * ($1.00 payout * contracts) - capital
-    expected_payout = model_prob * contracts
-    gross_profit = expected_payout - size
-    total_fees = fee + gas
-    net_profit = gross_profit - total_fees
-    net_roi = (net_profit / size) if size > 0 else 0.0
-
-    return {
-        "total_cost": size,
-        "fees": total_fees,
-        "gross_profit": gross_profit,
-        "net_profit": net_profit,
-        "net_roi": net_roi,
-    }
-
-
-# ---------------------------------------------------------------------------
 # Plan 04: CTF Primitives Fee Calculators
 # ---------------------------------------------------------------------------
 

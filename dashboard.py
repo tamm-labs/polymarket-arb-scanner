@@ -230,7 +230,6 @@ class _DashboardState:
         self.stale_detections = 0
         self.resolution_snipes = 0
         self.convergence_signals = 0
-        self.jev_crypto_opps = 0
         self.signal_sources_active = 0
         # MM Pilot telemetry
         self.mm_pilot = None
@@ -278,7 +277,6 @@ class _DashboardState:
             "stale_detections": self.stale_detections,
             "resolution_snipes": self.resolution_snipes,
             "convergence_signals": self.convergence_signals,
-            "jev_crypto_opps": self.jev_crypto_opps,
             "signal_sources_active": self.signal_sources_active,
             "strategy_metrics": self.strategy_metrics,
             "platform_health": self.platform_health,

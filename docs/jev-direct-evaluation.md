@@ -21,11 +21,12 @@ Jev's cache by IDs, rules, model and prompt version. Human promotion of discover
 pairs remains required. Missing Kalshi event-level rules suppress Jev acceptance;
 contract-level hydration is future work, not guessed from an event title.
 
-Crypto forecasts are explicitly uncalibrated research hypotheses. Code computes
-paper actions after receiving probabilities, preserves exact payoff rules and real
-expiry, and refuses missing inputs. The executor rejects JevCrypto in live mode,
-even if its research marker is removed. The legacy single-contract demo now invokes
-the same research monitor and requires an explicit database path.
+The Jev-directed crypto strike scanner (`scans/jev_crypto.py`), its research
+monitor (`scripts/jev_crypto_monitor.py`) and the single-contract demo were
+removed on 2026-09-28: Jev may not decide trades, so no scan may emit a
+Jev-forecast opportunity. The executor still refuses any `_research_only` or
+Jev-sourced opportunity in live mode. Existing `jev_decisions` rows remain
+readable by the resolution-sync and calibration tooling below.
 
 The paper probe exposed a shared order-book parser assumption: arrays were assumed
 best-first. The parser now selects minimum asks / maximum bids across valid levels
@@ -78,8 +79,7 @@ be treated as current operating evidence.
 
 ## Reproduce safely
 
-Run with Python 3.12 from the repository root. The monitor makes at most five Jev
-requests per cycle after filtering. `--once` exits; no scheduler is installed.
+Run with Python 3.12 from the repository root. No scheduler is installed.
 
 ```bash
 # Offline fixture validation; no provider call.
@@ -88,10 +88,6 @@ python scripts/jev_semantic_benchmark.py --output /tmp/jev-offline.json
 # Paid direct-provider smoke test, using an explicitly configured private key file.
 TYPESAFE_API_KEY_FILE=/absolute/private/key-file \
   python scripts/jev_semantic_benchmark.py --live --max-cases 24 --output /tmp/jev-live.json
-
-# One prospective research cycle, isolated from the trading database.
-TYPESAFE_API_KEY_FILE=/absolute/private/key-file \
-  python scripts/jev_crypto_monitor.py --once --db /absolute/research/jev.db
 
 # Read public finality and update only that explicitly selected research database.
 python scripts/sync_jev_resolutions.py --db /absolute/research/jev.db --limit 100
