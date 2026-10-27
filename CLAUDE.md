@@ -258,7 +258,7 @@ Add entries to `_CROSS_FEE_FUNCS` in `scans/cross.py` using `functools.partial(n
 
 ## Code Style
 
-- **Python 3.10+**. Use modern union syntax: `X | None`, `list[float]`, `tuple[bool, str]`. Never use `Optional`, `List`, `Dict`, `Tuple` from `typing`.
+- **Python 3.11+**. Use modern union syntax: `X | None`, `list[float]`, `tuple[bool, str]`. Never use `Optional`, `List`, `Dict`, `Tuple` from `typing`.
 - Double quotes for strings. ~120 char soft line limit.
 - Logging with `%`-style: `logger.info("Found %d opps in %s", count, market)`. (`executor.py` is the sole exception using f-strings.)
 - Section separators: `# ---------------------------------------------------------------------------` (75 dashes) between logical sections.

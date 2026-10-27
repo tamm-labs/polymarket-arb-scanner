@@ -66,7 +66,7 @@ python -m pytest tests/ -v -x                   # stop on first failure
 No linter or formatter is configured. Style is enforced by convention only.
 
 ### Python Version & Typing
-- Target **Python 3.10+**.
+- Target **Python 3.11+**.
 - Use modern union syntax: `X | None`, `list[float]`, `tuple[bool, str]`.
 - **Never** use `Optional`, `List`, `Dict`, `Tuple` from `typing`.
 

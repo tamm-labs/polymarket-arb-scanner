@@ -5,7 +5,7 @@ calibrated probabilities (noul), discrete selections (choice), and
 rubric scoring (score).
 
 Conventions:
-- Target Python 3.10+
+- Target Python 3.11+
 - "AI-powered software, not autonomous agents"
 - Deterministic code maintains 100% control over workflow and safety.
 """

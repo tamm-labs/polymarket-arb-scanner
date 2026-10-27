@@ -9,7 +9,7 @@
 - Never `--no-verify`; never force-push `master`.
 
 ## Code style (see CLAUDE.md "Code Style" for the full list)
-- Python 3.10+; modern unions (`X | None`, `list[float]`) — never `Optional`/`List`/`Dict`/`Tuple` from `typing`.
+- Python 3.11+; modern unions (`X | None`, `list[float]`) — never `Optional`/`List`/`Dict`/`Tuple` from `typing`.
 - Double quotes; ~120-char soft limit; `%`-style logging (`executor.py` excepted, uses f-strings).
 - 75-dash section separators between logical sections.
 - Relative imports within `scans/`; absolute elsewhere.
